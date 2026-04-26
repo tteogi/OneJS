@@ -209,6 +209,23 @@ public class JSRunner : MonoBehaviour {
     public static event Action<JSRunner> EditModePreviewStarted;
 #endif
 
+    /// Fires after `_bridge` (QuickJSUIBridge) is constructed and its
+    /// JSContext is live, but BEFORE any `Eval` runs. Subscribe to this
+    /// to call `qjs_start_debugger` while the context is still empty so
+    /// the scripts compiled below get instrumented with debug-trace
+    /// opcodes. Available in both Editor and player builds — useful for
+    /// remote-debugging mobile devices.
+    public static event Action<JSRunner> BridgeReady;
+
+    /// Fires immediately before user-facing scripts (entry script,
+    /// preloads, live-reload) are evaluated. Subscribe to this to
+    /// register each script with the CDP debug session (qjs_register_script),
+    /// which is what populates VSCode's Loaded Scripts panel and lets
+    /// setBreakpointByUrl resolve to a real script id. Internal glue
+    /// evals (globals, wrappers) do not fire this event.
+    /// Args: (runner, code, filename)
+    public static event Action<JSRunner, string, string> BeforeEval;
+
     /// <summary>
     /// Set PanelSettings at runtime and sync to the runtime UIDocument. Use this instead of assigning the field when changing from script.
     /// </summary>
@@ -827,11 +844,15 @@ public class JSRunner : MonoBehaviour {
             InitializeBridge();
 
 #if UNITY_EDITOR
-            // Editor: reload from file
+            // Editor: reload from file. Pass the absolute path so the
+            // OnejsDebugger can emit a `file://` scriptParsed URL — VSCode
+            // needs this to fetch the bundle's `//# sourceMappingURL=` map
+            // and translate user breakpoints (set on .tsx) to bundle line
+            // numbers.
             var entryFile = EntryFileFullPath;
             if (File.Exists(entryFile)) {
                 var code = File.ReadAllText(entryFile);
-                RunScript(code, Path.GetFileName(entryFile));
+                RunScript(code, entryFile);
                 if (Application.isPlaying) InvokeOnPlay();
             }
 #else
@@ -924,7 +945,8 @@ public class JSRunner : MonoBehaviour {
         }
 
         var code = File.ReadAllText(entryFile);
-        RunScript(code, Path.GetFileName(entryFile));
+        // Absolute path — see ReloadOnEnable for why.
+        RunScript(code, entryFile);
         if (Application.isPlaying) InvokeOnPlay();
 
         // Initialize file watching
@@ -995,6 +1017,12 @@ public class JSRunner : MonoBehaviour {
         // In builds, use persistent data path (bundle is self-contained)
         _bridge = new QuickJSUIBridge(_uiDocument.rootVisualElement, Application.persistentDataPath);
 #endif
+
+        // NativePtr is now live and no JS has run yet — debuggers hook here
+        // so scripts compiled below get instrumented and register as
+        // Debugger.scriptParsed. Fires in both Editor and player builds.
+        try { BridgeReady?.Invoke(this); }
+        catch (Exception ex) { Debug.LogError($"[JSRunner] BridgeReady handler threw: {ex}"); }
 
         // Apply stylesheets first so styles are ready when JS runs
         ApplyStylesheets();
@@ -1086,6 +1114,8 @@ public class JSRunner : MonoBehaviour {
             if (preload == null) continue;
 
             try {
+                try { BeforeEval?.Invoke(this, preload.text, preload.name); }
+                catch (Exception bex) { Debug.LogError($"[JSRunner] BeforeEval handler threw: {bex}"); }
                 _bridge.Eval(preload.text, preload.name);
                 _bridge.Context.ExecutePendingJobs();
             } catch (Exception ex) {
@@ -1110,6 +1140,8 @@ public class JSRunner : MonoBehaviour {
     }
 
     void RunScript(string code, string filename) {
+        try { BeforeEval?.Invoke(this, code, filename); }
+        catch (Exception ex) { Debug.LogError($"[JSRunner] BeforeEval handler threw: {ex}"); }
         _bridge.Eval(code, filename);
         // Execute pending Promise jobs immediately to allow React's first render
         _bridge.Context.ExecutePendingJobs();
@@ -1237,9 +1269,9 @@ public class JSRunner : MonoBehaviour {
             // 4. Recreate bridge and globals
             InitializeBridge();
 
-            // 5. Load and run script
+            // 5. Load and run script — absolute path so debugger can map.
             var code = File.ReadAllText(EntryFileFullPath);
-            RunScript(code, Path.GetFileName(EntryFileFullPath));
+            RunScript(code, EntryFileFullPath);
             if (Application.isPlaying) InvokeOnPlay();
 
             // 6. Update state
@@ -1354,7 +1386,8 @@ public class JSRunner : MonoBehaviour {
             InitializeBridge();
 
             var code = File.ReadAllText(entryFile);
-            RunScript(code, Path.GetFileName(entryFile));
+            // Absolute path so the debugger can map breakpoints via source map.
+            RunScript(code, entryFile);
 
             // Set up file watching for live reload in edit-mode
             _lastModifiedTime = File.GetLastWriteTime(entryFile);
