@@ -836,7 +836,7 @@ public class JSRunner : MonoBehaviour {
             _uiDocument.rootVisualElement.styleSheets.Clear();
         }
 
-        _bridge?.Dispose();
+        DisposeBridge();
         _bridge = null;
         _scriptLoaded = false;
 
@@ -872,7 +872,7 @@ public class JSRunner : MonoBehaviour {
 #endif
         } catch (Exception ex) {
             Debug.LogError($"[JSRunner] ReloadOnEnable failed: {ex.Message}");
-            _bridge?.Dispose();
+            DisposeBridge();
             _bridge = null;
             ResetPlayModeState();
         }
@@ -1017,6 +1017,16 @@ public class JSRunner : MonoBehaviour {
         CartridgeUtils.ExtractCartridges(WorkingDirFullPath, _cartridges, overwriteExisting: false, "[JSRunner]");
     }
 #endif // UNITY_EDITOR
+
+    /// Fires `BridgeDisposing` then disposes `_bridge`. Use everywhere
+    /// instead of calling `_bridge?.Dispose()` directly so subscribers
+    /// (debugger, profiler etc.) get a chance to release ctx-bound state.
+    void DisposeBridge() {
+        if (_bridge == null) return;
+        try { BridgeDisposing?.Invoke(this); }
+        catch (Exception ex) { Debug.LogError($"[JSRunner] BridgeDisposing handler threw: {ex}"); }
+        _bridge.Dispose();
+    }
 
     void InitializeBridge() {
 #if UNITY_EDITOR
@@ -1270,7 +1280,7 @@ public class JSRunner : MonoBehaviour {
             _uiDocument.rootVisualElement.styleSheets.Clear();
 
             // 3. Dispose old bridge/context
-            _bridge?.Dispose();
+            DisposeBridge();
             _bridge = null;
             _scriptLoaded = false;
 
@@ -1367,7 +1377,7 @@ public class JSRunner : MonoBehaviour {
                     _uiDocument.rootVisualElement.Clear();
                     _uiDocument.rootVisualElement.styleSheets.Clear();
                 }
-                _bridge?.Dispose();
+                DisposeBridge();
                 _bridge = null;
                 ResetPlayModeState();
                 break;
@@ -1427,7 +1437,7 @@ public class JSRunner : MonoBehaviour {
         } catch (Exception ex) {
             Debug.LogError($"[JSRunner] Edit-mode preview failed: {ex.Message}");
             // Clean up partial init
-            _bridge?.Dispose();
+            DisposeBridge();
             _bridge = null;
             _scriptLoaded = false;
         }
@@ -1446,7 +1456,7 @@ public class JSRunner : MonoBehaviour {
             _uiDocument.rootVisualElement.styleSheets.Clear();
         }
 
-        _bridge?.Dispose();
+        DisposeBridge();
         _bridge = null;
         _scriptLoaded = false;
     }
@@ -1673,7 +1683,7 @@ public class JSRunner : MonoBehaviour {
         UnityEditor.EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
 #endif
         if (Application.isPlaying) InvokeOnStop();
-        _bridge?.Dispose();
+        DisposeBridge();
         _bridge = null;
         _initialized = false;
     }
