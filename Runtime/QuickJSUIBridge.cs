@@ -53,10 +53,17 @@ public class QuickJSUIBridge : IDisposable {
     // TrickleDown hook: captured pointer events (Unity 6 delivers them directly
     // to the capturing element) and non-bubbling events like GeometryChangedEvent.
     readonly Dictionary<(int handle, string eventType), VisualElement> _perElementHandlers = new();
-    // Dedup: prevent double-dispatch when both _root TrickleDown and per-element fire
-    object _lastDispatchedPointerDown;
-    object _lastDispatchedPointerUp;
-    object _lastDispatchedPointerMove;
+
+    // Dedup: prevent double-dispatch when both _root TrickleDown and per-element
+    // fire for the same event. UI Toolkit's event pool reuses instances across
+    // dispatches, so a reference-equality check would treat consecutive pooled
+    // events as duplicates and silently drop them (this was the WebGL drag
+    // regression). EventBase.timestamp is refreshed in Init() each time an event
+    // is acquired from the pool, so it's the same within one dispatch (root +
+    // per-element phases) and different across dispatches.
+    long _lastDispatchedPointerDownTs = -1;
+    long _lastDispatchedPointerUpTs = -1;
+    long _lastDispatchedPointerMoveTs = -1;
 
     public QuickJSContext Context => _ctx;
     public VisualElement Root => _root;
@@ -200,6 +207,14 @@ public class QuickJSUIBridge : IDisposable {
     /// Call this once after the bootstrap and user code have been evaluated.
     /// </summary>
     public void CacheTickCallback() {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        // WebGL runs __tick directly via the browser RAF loop started by
+        // __startWebGLTick. There's no __registerCallback on the WebGL side
+        // (it's provided by the native QuickJS runtime, not the bootstrap),
+        // and JSRunner.TickIfReady doesn't call _bridge.Tick() on WebGL.
+        _tickCallbackHandle = -1;
+        return;
+#else
         try {
             var handleStr = _ctx.Eval("typeof __tick === 'function' ? __registerCallback(__tick) : -1");
             _tickCallbackHandle = int.Parse(handleStr);
@@ -207,6 +222,7 @@ public class QuickJSUIBridge : IDisposable {
             Debug.LogWarning($"[QuickJSUIBridge] Failed to cache __tick callback: {ex.Message}");
             _tickCallbackHandle = -1;
         }
+#endif
     }
 
     /// <summary>
@@ -252,10 +268,9 @@ public class QuickJSUIBridge : IDisposable {
         if (_disposed || _inEval) return;
         _inEval = true;
 
-        // Reset pointer event dedup references to prevent stale pooled-event matches
-        _lastDispatchedPointerDown = null;
-        _lastDispatchedPointerUp = null;
-        _lastDispatchedPointerMove = null;
+        // No per-frame dedup reset needed — dedup uses EventBase.timestamp,
+        // which is unique per dispatch (refreshed in EventBase.Init() each time
+        // the pool reuses an instance).
 
         try {
             // Process completed C# Tasks and resolve/reject their JS Promises
@@ -342,8 +357,8 @@ public class QuickJSUIBridge : IDisposable {
     }
 
     void OnPointerDown(PointerDownEvent e) {
-        if (ReferenceEquals(e, _lastDispatchedPointerDown)) return;
-        _lastDispatchedPointerDown = e;
+        if (e.timestamp == _lastDispatchedPointerDownTs) return;
+        _lastDispatchedPointerDownTs = e.timestamp;
         if (_eventDispatchHandle >= 0) {
             int handle = FindElementHandle(e.target);
             DispatchEventFast(EVT_POINTER_DOWN, handle, e.position.x, e.position.y, e.button, e.pointerId);
@@ -353,8 +368,8 @@ public class QuickJSUIBridge : IDisposable {
     }
 
     void OnPointerUp(PointerUpEvent e) {
-        if (ReferenceEquals(e, _lastDispatchedPointerUp)) return;
-        _lastDispatchedPointerUp = e;
+        if (e.timestamp == _lastDispatchedPointerUpTs) return;
+        _lastDispatchedPointerUpTs = e.timestamp;
         if (_eventDispatchHandle >= 0) {
             int handle = FindElementHandle(e.target);
             DispatchEventFast(EVT_POINTER_UP, handle, e.position.x, e.position.y, e.button, e.pointerId);
@@ -365,8 +380,8 @@ public class QuickJSUIBridge : IDisposable {
 
     void OnPointerMove(PointerMoveEvent e) {
         if (!InputBridge.PointerMoveEventsEnabled) return;
-        if (ReferenceEquals(e, _lastDispatchedPointerMove)) return;
-        _lastDispatchedPointerMove = e;
+        if (e.timestamp == _lastDispatchedPointerMoveTs) return;
+        _lastDispatchedPointerMoveTs = e.timestamp;
         if (_eventDispatchHandle >= 0) {
             int handle = FindElementHandle(e.target);
             DispatchEventFast(EVT_POINTER_MOVE, handle, e.position.x, e.position.y, e.button, e.pointerId);
@@ -718,21 +733,21 @@ public class QuickJSUIBridge : IDisposable {
     }
 
     void OnPerElementPointerDown(PointerDownEvent e) {
-        if (ReferenceEquals(e, _lastDispatchedPointerDown)) return;
-        _lastDispatchedPointerDown = e;
+        if (e.timestamp == _lastDispatchedPointerDownTs) return;
+        _lastDispatchedPointerDownTs = e.timestamp;
         DispatchPointerEvent("pointerdown", e.target, e.position, e.button, e.pointerId);
     }
 
     void OnPerElementPointerUp(PointerUpEvent e) {
-        if (ReferenceEquals(e, _lastDispatchedPointerUp)) return;
-        _lastDispatchedPointerUp = e;
+        if (e.timestamp == _lastDispatchedPointerUpTs) return;
+        _lastDispatchedPointerUpTs = e.timestamp;
         DispatchPointerEvent("pointerup", e.target, e.position, e.button, e.pointerId);
     }
 
     void OnPerElementPointerMove(PointerMoveEvent e) {
         if (!InputBridge.PointerMoveEventsEnabled) return;
-        if (ReferenceEquals(e, _lastDispatchedPointerMove)) return;
-        _lastDispatchedPointerMove = e;
+        if (e.timestamp == _lastDispatchedPointerMoveTs) return;
+        _lastDispatchedPointerMoveTs = e.timestamp;
         DispatchPointerEvent("pointermove", e.target, e.position, e.button, e.pointerId);
     }
 
